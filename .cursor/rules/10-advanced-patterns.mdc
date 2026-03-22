@@ -1,0 +1,49 @@
+---
+description: Advanced patterns for VnExpress crawler: backfills, scaling, Gemini tuning
+globs: ["**/*.py", "**/*.md", "**/*.mdc"]
+---
+
+# 10 – Advanced Patterns
+
+This file collects patterns for extending and scaling the **VnExpress crawler** and **Gemini silver** pipeline.
+
+## Scheduling and Backfills
+
+- **Crawl frequency**: Default once per day; increase to twice daily or more if needed (adjust discover + fetch schedule). Respect politeness and VnExpress load.
+- **Backfills**:
+
+```python
+# Bronze: re-seed queue for past date
+discover_links(ingestion_date="2025-01-15")
+fetch_html(ingestion_date="2025-01-15")
+
+# Silver: re-run for ingestion_date; dedupe by article_id
+df = df.drop_duplicates(subset=["article_id"], keep="last")
+```
+
+Use Airflow backfill or manual DAG run with `logical_date` set to target day.
+
+## Schema Evolution (Silver)
+
+- **New fields from Gemini**: Extend the extraction prompt and JSON schema; add columns to silver Parquet and gold. Backfill by re-running silver for affected dates (optional).
+- **New sections**: Add section URLs to discovery config; no schema change if section is already a string field.
+
+## Scaling Workers and Gemini
+
+- **Workers**: Increase Airflow parallelism or use dynamic task mapping so more SQS batches are processed in parallel. Monitor SQS depth and S3 write rate.
+- **Gemini**:
+  - **Rate limits**: Batch (e.g. 20 per call); retries and backoff on 429.
+  - **Token cost**: Truncate HTML (e.g. `html[:8000]`); use flash model for cost.
+  - **Structured output**: Prefer JSON mode or strict prompt; avoid regex on free-form text.
+
+## Politeness and Robustness
+
+- **Crawl**: Respect robots.txt; use a reasonable User-Agent; add small random delays between requests in workers.
+- **Duplicate URLs**: Discovery dedupes within run; SQS can deliver at-least-once — workers can overwrite same-day same article_id so you keep one snapshot per article per day.
+- **HTML changes**: Rely on Gemini for robustness to layout changes; if extraction degrades, update prompt or add fallback (e.g. BeautifulSoup for title only) and add regression tests with new HTML fixtures.
+
+## Observability
+
+- **Logging**: Log URLs discovered, messages received/sent, HTML fetched count, Gemini call count, silver row count, and any failures (with article_id or URL for debugging).
+- **Metrics**: Optional — expose counts to Prometheus/StatsD (e.g. articles per section, Gemini latency, SQS depth).
+- **Alerts**: Slack on DAG failure; optional alert if silver row count is far below bronze file count (indicates Gemini or parsing issues).

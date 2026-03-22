@@ -1,0 +1,9 @@
+# VnExpress silver config: Gemini extraction and Parquet output
+# Used by vnexpress_silver_gemini_dag (Phase 3)
+
+data_config:
+  gemini_model: "gemini-2.5-flash"   # fallback if Variable not set
+  max_body_chars: 8000
+  batch_size: 5   # Articles per Gemini API call
+  silver_prefix: "vnexpress/silver/"
+  num_silver_workers: 4  # Parallel workers for silver extraction (chunk size derived from keys count)

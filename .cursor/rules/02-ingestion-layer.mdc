@@ -1,0 +1,95 @@
+---
+description: Ingestion patterns for discovering and fetching VnExpress pages (SQS frontier + workers)
+globs: ["**/*.py", "**/*.md", "**/*.mdc"]
+---
+
+# 02 – Ingestion Layer (VnExpress)
+
+This file guides how to **discover article URLs** from `https://vnexpress.net/` and **fetch raw HTML** using a queue-based, multi-worker design.
+
+## Goals
+
+- **Discovery**: Find canonical article URLs from the homepage and configured section pages.
+- **Queue frontier**: Push each URL into **SQS** so multiple workers can fetch in parallel without coordination.
+- **Workers**: Poll SQS in batches, download HTML for each URL, and store raw snapshots in S3 (bronze).
+- **Robustness**: Retries, timeouts, polite rate; clear logging (URLs discovered, fetched, failed).
+
+## Link Discovery
+
+- **Sources**:
+  - Homepage: `https://vnexpress.net/`.
+  - Section pages (e.g. Thời sự, Thế giới, Kinh doanh, Khoa học công nghệ) — URLs from config.
+- **Flow**:
+  1. Fetch each seed URL with `requests` or `httpx` (timeout 10–15s, 1–3 retries).
+  2. Parse HTML (e.g. BeautifulSoup) and extract `<a href="...">` whose `href` matches allowed patterns (e.g. `https://vnexpress.net/[article-path]`).
+  3. Normalize URLs: ensure `https://vnexpress.net` prefix; strip tracking/fragment query params if needed.
+  4. Deduplicate within the run (e.g. in-memory `set`).
+  5. Push each URL to **SQS** (one message per URL). Message body (JSON):
+     ```json
+     {
+       "url": "https://vnexpress.net/...",
+       "source": "homepage|section_name",
+       "discovered_at": "YYYY-MM-DDTHH:MM:SSZ",
+       "ingestion_date": "YYYY-MM-DD"
+     }
+     ```
+- **Config**: Seed URLs and allowed URL regex in YAML. SQS queue URL from Airflow Variable.
+
+## HTML Fetch Workers (Multi-Worker)
+
+- **Source**: SQS queue populated by the discovery task.
+- **Flow (per worker task)**:
+  1. Use `SqsHook` to `receive_messages` in batches (e.g. 5–10 messages, visibility timeout ~60s).
+  2. For each message:
+     - Parse JSON body → `url`, `source`, `ingestion_date`.
+     - GET `url` with `requests`/`httpx` (timeout, retries). Use a polite User-Agent.
+     - On non-200: log status; optionally write a small error record to S3 or re-queue; then delete or leave message for retry per policy.
+     - Derive stable `article_id` (e.g. `hashlib.sha256(url.encode()).hexdigest()[:16]` or slug from path).
+     - Write raw HTML to S3 bronze; key pattern:
+
+```python
+key = f"{prefix}ingestion_date={ingestion_date}/source={source}/article_id={article_id}.html"
+s3_hook.load_bytes(html_bytes, key=key, bucket_name=bucket, replace=True)
+```
+     - Optionally write a sidecar `.meta.json` with url, status, fetched_at.
+     - **Delete the SQS message** on success so it is not reprocessed.
+  3. Loop until queue is empty (or max iterations per task to avoid runaway).
+- **Concurrency**:
+  - Run multiple worker tasks in parallel (Airflow parallelism or dynamic task mapping over batches).
+  - Control politeness: small sleep between requests; limit concurrent requests per task.
+
+## Validation (Bronze)
+
+- URL must be valid and match `https://vnexpress.net/...`.
+- HTML: non-empty; optionally check for basic structure (`<html>`, presence of article-like content) and log failures.
+
+## Integration with Airflow
+
+- **Discovery**: One DAG/task runs on schedule (e.g. once per day). Uses `@task`, reads config, pushes to SQS.
+- **Workers**: Same or separate DAG; one or more `@task` that receive from SQS and write to S3. Use `aws_dag_executor` (or equivalent) for both S3 and SQS; for **local demo** point `aws_dag_executor` at Localstack (`endpoint_url` in connection extra).
+
+## Code Patterns
+
+**Discovery task** – load config, fetch, push to SQS:
+
+```python
+config = load_yml_configs(f"{CONFIG_PATH}/bronze/vnexpress_bronze.yml")
+seed_urls = config["data_config"]["seed_urls"]
+pattern = config["data_config"]["allowed_url_patterns"]
+# Fetch each seed, parse HTML, extract links, dedupe, push to SQS
+sqs_hook.send_message(queue_url=queue_url, message_body=json.dumps({"url": url, "source": "homepage"}))
+```
+
+**Worker task** – receive, fetch, write, delete:
+
+```python
+messages = sqs_hook.receive_messages(queue_url=queue_url, max_number_of_messages=10)
+for msg in messages:
+    body = json.loads(msg["Body"])
+    html = requests.get(body["url"], timeout=15).text
+    article_id = hashlib.sha256(body["url"].encode()).hexdigest()[:16]
+    s3_hook.load_bytes(html.encode(), key=key, bucket_name=bucket, replace=True)
+    sqs_hook.delete_message(queue_url=queue_url, receipt_handle=msg["ReceiptHandle"])
+```
+
+**Helpers** – `url_normalizer`, `html_fetcher` in utils so logic is testable without Airflow.

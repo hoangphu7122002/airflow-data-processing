@@ -1,0 +1,69 @@
+---
+description: Testing and data-quality checks for VnExpress crawler and Gemini silver
+globs: ["**/*.py", "**/*.md", "**/*.mdc", "tests/**/*.py"]
+---
+
+# 07 – Data Quality and Testing
+
+This file describes how to protect the **VnExpress crawler** and **silver (Gemini)** pipeline from regressions and bad data.
+
+## Testing Layers
+
+### Unit Tests
+
+**URL discovery** – fixture HTML, extract links, assert pattern:
+
+```python
+@pytest.fixture
+def listing_html():
+    return "<html><a href='https://vnexpress.net/article-123.html'>...</a></html>"
+
+def test_extract_links(listing_html):
+    links = extract_links(listing_html, pattern=r"https://vnexpress\.net/[^/]+-\d+\.html")
+    assert all("vnexpress.net" in u for u in links)
+```
+
+**Gemini silver** – mock API, no real calls:
+
+```python
+@patch("utils.gemini_extract.call_gemini")
+def test_silver_parse(mock_gemini):
+    mock_gemini.return_value = {"title": "Test", "url": "https://..."}
+    result = parse_article(html_fixture)
+    assert result["title"] == "Test"
+```
+
+**Schema validation** – required fields, section in allowed set, dates parseable.
+
+### Integration Tests
+
+- Localstack: create bucket/queue; push URLs to SQS; run worker; assert S3 objects.
+- Silver: fixture HTML in temp S3; mocked Gemini; assert Parquet columns and row count.
+
+**Fixtures**: Listing HTML with `<a href="https://vnexpress.net/...">`; article HTML; `gemini_extract_response.json` for mock.
+
+## Data-Quality Checks
+
+- **Bronze**:
+  - No empty HTML (length > threshold).
+  - URL in meta matches expected domain.
+- **Silver (after Gemini)**:
+  - Required: `article_id`, `url`, `title` non-null and non-empty.
+  - Optional: `section` in known list; `published_at` valid or null; `body_text` or `summary` present for a minimum fraction of rows.
+- **Automated checks**: Airflow task `validate_silver`:
+
+```python
+df = read_silver_parquet(s3_hook, bucket, ds)
+assert df["article_id"].notna().all() and df["title"].notna().all()
+if not valid: raise ValueError("Silver validation failed")
+```
+
+## Handling HTML and Gemini Changes
+
+- **VnExpress layout change**: Update fixtures; adjust discovery selectors or Gemini prompt if extraction breaks; add regression test with new HTML.
+- **Gemini schema change**: Update prompt and parser; extend fixtures and tests; version the expected JSON shape in config or code comments.
+
+## Security
+
+- **API keys**: Gemini key only in Airflow Variable (or secrets backend); never in repo or config files.
+- **Tests**: Use mock for Gemini so no real key is required in CI.

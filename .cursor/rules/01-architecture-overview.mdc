@@ -1,0 +1,164 @@
+---
+description: System design and data flow for the VnExpress web crawler project
+globs: ["**/*.py", "**/*.md", "**/*.mdc", "docker-compose.yml"]
+---
+
+# Architecture Overview
+
+> **Related Files**
+> - Ingestion: [02-ingestion-layer.mdc](02-ingestion-layer.mdc) | [03-raw-storage-bronze.mdc](03-raw-storage-bronze.mdc)
+> - Transforms: [04-transform-silver.mdc](04-transform-silver.mdc) | [05-analytics-gold-clickhouse.mdc](05-analytics-gold-clickhouse.mdc)
+> - Orchestration: [06-airflow-dags.mdc](06-airflow-dags.mdc)
+> - Quality & Ops: [07-data-quality-and-testing.mdc](07-data-quality-and-testing.mdc) | [09-config-and-deployment.mdc](09-config-and-deployment.mdc)
+
+## System Purpose
+
+A **VnExpress content data platform** that:
+
+- **Discovers** article URLs from `https://vnexpress.net/` and key sections.
+- **Pushes** discovered URLs into a **queue (SQS)** acting as the URL frontier.
+- **Pulls** URLs from the frontier using multiple workers running as Airflow tasks.
+- **Persists** raw HTML snapshots (bronze) in S3, partitioned by date and source.
+- **Parses and normalizes** HTML into structured article entities (silver) using **LLM Gemini** to extract title, section, summary, entities, and other fields from raw HTML.
+- Optionally **loads** analytics-ready tables (gold) for dashboards, search, or downstream processing.
+
+**Why it matters**: Provides a realistic, production-style crawler for a major Vietnamese news site ([VnExpress](https://vnexpress.net/)), demonstrating queue-based crawling, multi-worker orchestration, and ETL patterns that can be reused for other domains.
+
+## High-Level Architecture (VnExpress Crawler)
+
+```mermaid
+flowchart LR
+    subgraph Sources
+        home[https://vnexpress.net/]
+        sections[VnExpress section pages]
+    end
+
+    subgraph Queue
+        sqs[SQS URLFrontier\n(article URLs)]
+    end
+
+    subgraph Airflow
+        discover[discover_links_dag\n(seed + section crawl)]
+        workers[multi_workers_dag\nfetch HTML from SQS]
+        silverDAG[silver DAG\nGemini HTML → structured]
+    end
+
+    bronzeS3[S3 Bronze\n(raw HTML snapshots)]
+    silverS3[S3 Silver\n(parsed articles, optional)]
+    goldS3[S3/DB Gold\nanalytics/search, optional]
+
+    home --> discover
+    sections --> discover
+    discover --> sqs
+
+    sqs --> workers
+    workers --> bronzeS3
+
+    bronzeS3 --> silverDAG
+    silverDAG --> silverS3
+    silverS3 --> goldS3
+```
+
+## Components
+
+### 1. Ingestion (Link Discovery & Fetch)
+
+Implemented inside DAGs under `src/dags`:
+
+- **Link discovery** (e.g. `vnexpress_discover_links_dag.py`):
+  - Fetches homepage and configured section URLs.
+  - Extracts article links that match allowed patterns (e.g. `https://vnexpress.net/...`).
+  - Normalizes and deduplicates URLs.
+  - Pushes URLs (with metadata like discovery source and date) into SQS as messages.
+- **HTML fetch workers** (e.g. `vnexpress_fetch_workers_dag.py` or tasks in the same DAG):
+  - Poll SQS in batches, each message containing a URL (and metadata).
+  - Fetch HTML via `requests`/`httpx` with timeouts and retries.
+  - Derive stable article IDs from URLs.
+  - Store HTML snapshots and optional metadata in S3 bronze.
+
+**Details**: [02-ingestion-layer.mdc](02-ingestion-layer.mdc)
+
+### 2. Bronze Storage (S3)
+
+- **Responsibility**: Store raw HTML snapshots plus minimal metadata (URL, discovery source, timestamps).
+- **Patterns**: S3 prefixes like `vnexpress/bronze/ingestion_date=YYYY-MM-DD/source=<section>/article_id=<id>.html`.
+- **Key concerns**: Path stability, partitioning by ingestion date, append-only writes (never mutate old snapshots).
+
+**Details**: [03-raw-storage-bronze.mdc](03-raw-storage-bronze.mdc)
+
+### 3. Silver Transforms (LLM Gemini)
+
+- **Responsibility**: Convert raw HTML (bronze) to structured article entities using **Google Gemini**.
+- **Flow**:
+  - Read HTML files from S3 bronze for the target ingestion date.
+  - Send HTML (or truncated/sanitized) to Gemini with a **structured extraction prompt** (e.g. JSON schema: title, section, published_at, summary, main_entities, tags).
+  - Parse Gemini response (JSON); validate and normalize (dates, section enums, empty handling).
+  - Deduplicate by `article_id`; track first_seen/last_seen.
+  - Write Parquet to S3 under `vnexpress/silver/ingestion_date=YYYY-MM-DD/`.
+- **Config**: Gemini API key via Airflow Variable; model name and prompt in config or code. Rate-limit and batch size per run to stay within API quotas.
+
+**Details**: [04-transform-silver.mdc](04-transform-silver.mdc)
+
+### 4. Gold Layer (Optional)
+
+- **Responsibility**: Provide analytics-friendly and/or search-friendly representations of VnExpress content.
+- **Patterns**:
+  - Tables or datasets for article-level analytics (by section, time, topic).
+  - Optional ClickHouse schema or search index (Elastic/OpenSearch) fed from silver.
+- **Paths**: Defined in [05-analytics-gold-clickhouse.mdc](05-analytics-gold-clickhouse.mdc).
+
+### 5. Orchestration (Airflow + SQS)
+
+- **Key DAGs**: at minimum:
+  - `vnexpress_discover_links` – seeds SQS with URLs once per day.
+  - `vnexpress_fetch_html` – one or more worker DAGs/tasks that drain SQS and write to S3.
+- **Pattern**: `@dag` + `@task`, logic in shared utils modules, queue behavior configured via Variables and YAML config.
+
+**Details**: [06-airflow-dags.mdc](06-airflow-dags.mdc)
+
+## End-to-End Data Flow
+
+```mermaid
+sequenceDiagram
+    participant Airflow
+    participant Web as vnexpress.net
+    participant SQS as URLFrontier
+    participant Bronze as S3Bronze
+    participant Silver as S3Silver
+    participant Gold as S3Gold
+
+    Airflow->>Web: discover_links_dag.fetch_home_and_sections()
+    Web-->>Airflow: HTML pages
+    Airflow->>SQS: push article URLs
+
+    Airflow->>SQS: fetch_html_workers.receive_messages()
+    SQS-->>Airflow: URL batch
+    Airflow->>Web: GET article HTML
+    Web-->>Airflow: article HTML
+    Airflow->>Bronze: write raw HTML snapshots
+
+    Airflow->>Bronze: (optional) read snapshots
+    Airflow->>Silver: write parsed article records
+    Airflow->>Gold: (optional) load analytics/search structures
+```
+
+## Design Principles
+
+1. **Separation of concerns**: Link discovery → queue; workers → HTML fetch + bronze; parsers → silver; analytics → gold; DAGs only orchestrate.
+2. **Idempotency**: Bronze writes to deterministic partitions; silver/gold dedupe by article_id + date; re-runs don’t create duplicates.
+3. **Schema-first**: Define article schema and analytics needs first, then design silver and any gold/warehouse schemas accordingly.
+4. **Observability**: Log counts (URLs discovered, messages processed, HTML fetched, parse success/fail); use Slack alerts; keep S3 paths inspectable for debugging/backfills.
+
+## Technology Choices
+
+- **Language**: Python (crawler, transforms, Airflow tasks).
+- **Orchestration**: Apache Airflow (Dockerized).
+- **Storage**: S3 (bronze raw HTML; optional silver/gold).
+- **Messaging**: Amazon SQS for URL frontier and optional downstream notifications.
+- **Alerts**: Slack via Airflow Slack webhook.
+
+## Next Steps
+
+1. Keep silver/gold (if used) schemas in sync with DAGs and `src/dags/configs`.
+2. When adding sections or changing crawl patterns, update [02-ingestion-layer.mdc](02-ingestion-layer.mdc) and [03-raw-storage-bronze.mdc](03-raw-storage-bronze.mdc).
+3. Use [06-airflow-dags.mdc](06-airflow-dags.mdc) as a template for any new crawler DAGs.

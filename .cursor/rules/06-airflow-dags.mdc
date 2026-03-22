@@ -1,0 +1,97 @@
+---
+description: Airflow DAGs for VnExpress: discover → SQS → workers → bronze; silver (Gemini) → gold
+globs: ["**/*.py", "**/*.md", "**/*.mdc", "docker-compose.yml"]
+---
+
+# 06 – Airflow DAGs
+
+This file describes how to orchestrate the **VnExpress crawler** and **silver (Gemini)** pipeline in Airflow. Use **Localstack** for S3/SQS in local demo; same DAG code runs against real AWS in production.
+
+## Main DAGs
+
+### 1. `vnexpress_discover_links_dag`
+
+- **Purpose**: Discover article URLs from homepage and sections; push to SQS.
+- **Schedule**: Once per day (e.g. `0 2 * * *`).
+- **Tasks**:
+  - `discover_links`:
+    - Load config: `load_yml_configs(f"{CONFIG_PATH}/bronze/vnexpress_bronze.yml")` → seed_urls, allowed_url_patterns.
+    - Fetch each seed URL; parse HTML; extract and normalize links; dedupe.
+    - Push each URL as JSON message to SQS (queue URL from Variable `vnexpress_sqs_queue_url`).
+    - Log count of URLs pushed.
+- **Connection**: `aws_dag_executor` (Localstack or real AWS).
+
+### 2. `vnexpress_fetch_html_dag` (Multi-Worker)
+
+- **Purpose**: Drain SQS, fetch HTML for each URL, write to S3 bronze.
+- **Schedule**: After discover (e.g. 10 min after, or same DAG with dependency). Can run multiple times until queue is empty.
+- **Tasks**:
+  - Option A: Single `fetch_batch` task that receives up to N messages, fetches all, writes to S3, deletes messages; trigger DAG again or use a sensor/loop until queue empty.
+  - Option B: Dynamic task mapping — split queue into chunks and map over `fetch_html_chunk` so multiple workers run in parallel.
+- **Each worker**:
+  - Uses `SqsHook.receive_messages()` (batch size from config).
+  - For each message: GET url, derive article_id, write HTML to S3 key `vnexpress/bronze/ingestion_date=.../source=.../article_id=....html`, delete message.
+  - Uses `S3Hook` and bucket from Variable `vnexpress_s3_bucket`.
+- **Connection**: Same `aws_dag_executor` (Localstack for local).
+
+### 3. `vnexpress_silver_gemini_dag`
+
+- **Purpose**: Read bronze HTML for a given ingestion_date; call Gemini to extract structured fields; write silver Parquet to S3.
+- **Schedule**: After fetch (e.g. same day, 1h after fetch DAG or triggered by sensor when bronze partition is ready).
+- **Tasks**:
+  - `run_silver_gemini`:
+    - List S3 keys under `vnexpress/bronze/ingestion_date={{ ds }}/` (or from upstream XCom).
+    - Download HTML (or stream); optionally trim for token limit.
+    - For each (or batched) HTML: call Gemini with extraction prompt; parse JSON; validate; collect records.
+    - Deduplicate by article_id; set first_seen_at / last_seen_at.
+    - Write Parquet to `vnexpress/silver/ingestion_date={{ ds }}/`.
+  - **Variables**: `gemini_api_key`; config: model, batch_size, silver_prefix from silver YAML.
+- **Retries**: Recommend 1–2 retries for Gemini (rate limits); backoff 60s.
+
+### 4. Optional: `vnexpress_gold_load_dag`
+
+- **Purpose**: Read silver Parquet; write gold (S3 and/or ClickHouse).
+- **Schedule**: After silver (e.g. same day).
+- **Tasks**: Read silver, dedupe/aggregate, write gold Parquet to S3 and/or bulk insert into ClickHouse.
+
+## Design Guidelines
+
+- **Thin DAGs**: Logic in utils; DAGs define tasks and dependencies only.
+- **Config**: YAML (bronze, silver); bucket and queue from Variables; Gemini key in Variable only.
+- **Localstack**: `aws_dag_executor` with `endpoint_url`; create bucket/queue on startup.
+- **Alerts**: `SlackWebhookOperator(trigger_rule="one_failed", ...)` for critical DAGs.
+
+## Scheduling Summary
+
+| DAG                         | Schedule     | Note                    |
+|-----------------------------|-------------|-------------------------|
+| vnexpress_discover_links    | 0 2 * * *   | Daily 02:00             |
+| vnexpress_fetch_html        | 0 2 * * *   | After discover (offset) |
+| vnexpress_silver_gemini     | 0 4 * * *   | After fetch             |
+| vnexpress_gold_load         | 0 5 * * *   | Optional                |
+
+## DAG Skeleton (Discover → Fetch → Silver)
+
+```python
+from airflow.decorators import dag, task
+import pendulum
+
+@dag(schedule="0 2 * * *", start_date=pendulum.datetime(2025, 1, 1), catchup=False)
+def vnexpress_crawl():
+    @task
+    def discover_links(): ...
+
+    @task
+    def fetch_html_batch(): ...
+
+    discover_links() >> fetch_html_batch()
+
+@dag(schedule="0 4 * * *", start_date=pendulum.datetime(2025, 1, 1), catchup=False)
+def vnexpress_silver():
+    @task
+    def run_gemini_silver(ingestion_date: str): ...
+
+    run_gemini_silver("{{ ds }}")
+```
+
+Use `ingestion_date` from logical date or pass from upstream. Gemini key from `Variable.get("gemini_api_key")`.

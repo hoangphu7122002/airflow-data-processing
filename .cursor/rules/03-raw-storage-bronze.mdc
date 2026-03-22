@@ -1,0 +1,65 @@
+---
+description: S3 bronze layout for raw VnExpress HTML snapshots; Localstack for local demo
+globs: ["**/*.py", "**/*.md", "**/*.mdc"]
+---
+
+# 03 – Raw Storage (Bronze)
+
+The bronze layer stores **raw HTML** from VnExpress article pages: unmodified response bodies plus minimal metadata. For **local demo**, use **Localstack** for S3 (and SQS) so the same code runs without real AWS.
+
+## Storage Backend
+
+- **Production**: Real S3 bucket (name from Airflow Variable, e.g. `vnexpress_s3_bucket`).
+- **Local demo**: **Localstack** S3. Configure Airflow connection `aws_dag_executor` with:
+  - Endpoint URL pointing to Localstack (e.g. `http://localstack:4566`).
+  - Any placeholder AWS key/secret; Localstack accepts static test credentials.
+- Use `S3Hook(aws_conn_id="aws_dag_executor")` and the same bucket/prefix Variables so switching between Localstack and real AWS is configuration-only.
+
+## Path Layout
+
+Partition by **ingestion date** (date of the crawl run).
+
+- **Prefix pattern**: `vnexpress/bronze/ingestion_date=YYYY-MM-DD/source=<source>/`
+  - `<source>`: e.g. `homepage`, `thoi-su`, `the-gioi`, etc. (from discovery message).
+- **Object keys**:
+  - HTML: `article_id=<id>.html` (e.g. `article_id=a1b2c3d4e5f6.html`).
+  - Optional metadata: `article_id=<id>.meta.json` with `{"url": "...", "http_status": 200, "fetched_at": "..."}`.
+
+Example full key:
+`vnexpress/bronze/ingestion_date=2026-03-06/source=homepage/article_id=a1b2c3d4e5f6.html`
+
+## Conventions
+
+- **Append-only**: Workers only create new objects; do not overwrite or delete existing bronze objects from transform logic.
+- **Encoding**: Store HTML as UTF-8 (ensure response encoding is set when writing).
+- **Idempotency**: Same URL in two runs can produce two snapshots (different ingestion_date or same date with same article_id overwriting only if you design workers to overwrite same-day same-id — recommend overwrite per run so one snapshot per article per day).
+
+## Writing from Workers
+
+- Workers build key and write:
+
+```python
+key = f"{prefix}ingestion_date={ingestion_date}/source={source}/article_id={article_id}.html"
+s3_hook.load_bytes(html.encode("utf-8"), key=key, bucket_name=bucket, replace=True)
+```
+- Bucket and base prefix from config + Variables; ensure bucket exists (create in Localstack via init script or docker-compose).
+
+## Reading for Silver
+
+- Silver DAG lists, filters, downloads:
+
+```python
+prefix = f"vnexpress/bronze/ingestion_date={ingestion_date}/"
+keys = [k for k in s3_hook.list_keys(bucket, prefix=prefix) if k.endswith(".html")]
+for key in keys:
+    html = s3_hook.read_key(key, bucket)
+    # Pass to Gemini or parser
+```
+
+## Localstack Setup (Local Demo)
+
+- In `docker-compose.yml`, add a **Localstack** service (e.g. image `localstack/localstack`, expose edge port 4566).
+- Create S3 bucket and SQS queue on startup (e.g. init container or `awslocal s3 mb`, `awslocal sqs create-queue`).
+- Set Airflow Variables: `vnexpress_s3_bucket`, `vnexpress_sqs_queue_url`.
+- Set Airflow connection `aws_dag_executor`: extra `{"endpoint_url": "http://localstack:4566"}` (or `host` for older provider). Use test credentials (e.g. `test`/`test`).
+- Connection extra: `{"endpoint_url": "http://localstack:4566"}`; credentials `test`/`test`.

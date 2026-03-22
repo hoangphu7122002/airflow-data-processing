@@ -1,0 +1,14 @@
+---
+description: Entry point for Cursor rules for the VnExpress web crawler and analytics project.
+globs: ["**/*.py", "**/*.md", "**/*.mdc", "docker-compose.yml"]
+---
+
+# VnExpress Crawler ETL – Cursor Rules
+
+This project’s detailed guidance lives under `./.cursor/rules`.
+
+Start with:
+
+- `./.cursor/rules/00-index.mdc` for navigation and roadmap.
+- `./.cursor/rules/01-architecture-overview.mdc` for the high-level system design.
+- Skills: resource-reference-codebase-patterns, dag-airflow-patterns, s3-sqs-ingestion, validation-testing, config-yaml-bronze-silver-gold, gemini-silver-extraction, docker-compose-local-testing.

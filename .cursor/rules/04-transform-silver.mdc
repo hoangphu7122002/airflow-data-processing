@@ -1,0 +1,97 @@
+---
+description: Silver layer: LLM Gemini for HTML processing and parsed article schema
+globs: ["**/*.py", "**/*.md", "**/*.mdc"]
+---
+
+# 04 – Transform (Silver) — LLM Gemini
+
+Silver converts **raw HTML** (bronze) into **structured article records** using **Google Gemini**. The LLM extracts title, section, summary, entities, and other fields from HTML so you get consistent, queryable data without maintaining brittle selectors for every layout change.
+
+## Goals
+
+- **Input**: Bronze HTML files from S3 for a given `ingestion_date`.
+- **Processing**: Send HTML (or a truncated/sanitized version) to **Gemini** with a structured-extraction prompt; parse JSON response.
+- **Output**: Parquet (or JSON) in S3 under `vnexpress/silver/ingestion_date=YYYY-MM-DD/`, one row per article with normalized fields.
+- **Idempotency**: Deduplicate by `article_id`; track first_seen_at / last_seen_at when re-processing same article.
+
+## Gemini Integration
+
+- **Model**: Use a Gemini model capable of structured output (e.g. `gemini-1.5-flash` or `gemini-1.5-pro`). Prefer a model that supports JSON mode or follow a clear response format in the prompt.
+- **Auth**: Store Gemini API key in Airflow Variable (e.g. `gemini_api_key`). Do not commit keys. Use Google AI Python SDK (`google-generativeai`) or REST with the variable in code.
+- **Prompt design**:
+  - Provide clear instructions: “Extract from this Vietnamese news article HTML the following fields in JSON.”
+  - Specify schema in the prompt, e.g.:
+    - `title` (string)
+    - `section` (string, e.g. Thời sự, Thế giới, Kinh doanh)
+    - `published_at` (ISO8601 or null)
+    - `summary` (string, short abstract)
+    - `main_entities` (list of strings: people, orgs, places mentioned)
+    - `tags` (list of strings)
+    - `body_text` (string, plain text of article body, max N chars if needed)
+  - Ask for **only valid JSON** in the response so you can parse with `json.loads()`; optionally use a wrapper like “Respond with a JSON object and nothing else.”
+- **Input size**: HTML can be large. Options:
+  - Send full HTML if within model context limit.
+  - Or pre-process with BeautifulSoup: extract only `<article>`, `.content`, or specific divs, and strip scripts/styles to reduce tokens.
+- **Rate limits**: Respect Gemini quotas. Process in batches (e.g. 10–50 articles per task); add small delays between API calls; use retries with backoff on 429/resource-exhausted.
+
+## Silver Schema (Logical)
+
+- `article_id` (string) — from bronze key, stable per URL.
+- `url` (string) — canonical article URL.
+- `title` (string)
+- `section` (string) — normalized section/category.
+- `published_at` (timestamp, nullable)
+- `summary` (string, nullable)
+- `body_text` (string, nullable; may be truncated)
+- `main_entities` (array of strings, nullable)
+- `tags` (array of strings, nullable)
+- `first_seen_at` (timestamp) — first time we saw this article_id in bronze.
+- `last_seen_at` (timestamp) — last processing time.
+- `ingestion_date` (string) — partition key.
+
+## Transform Steps
+
+1. **List bronze keys** for `ingestion_date` under `vnexpress/bronze/ingestion_date=YYYY-MM-DD/` (all `.html` files).
+2. **Download HTML** (or stream) and optionally trim to relevant fragment to save tokens.
+3. **For each HTML**:
+   - Call Gemini with the extraction prompt and HTML (or fragment).
+   - Parse JSON from response; validate required fields (e.g. title, url); normalize types (dates, lists).
+   - Enrich with `article_id`, `url` (from metadata or prompt), `ingestion_date`, `first_seen_at`, `last_seen_at`.
+4. **Deduplicate**: If same `article_id` appears multiple times (e.g. from multiple sources), keep one row and set `last_seen_at` to latest.
+5. **Write Parquet** to `vnexpress/silver/ingestion_date=YYYY-MM-DD/silver_articles_<run_id>.parquet` (or single file per day).
+
+## Validation (Silver)
+
+- Required: `article_id`, `url`, `title` non-empty.
+- Optional: `section` in allowed set; `published_at` parseable or null.
+- On Gemini failure or invalid JSON: log and skip that article; optionally write failed article_ids to a separate error table or log for retry.
+
+## Config (YAML)
+
+```yaml
+data_config:
+  gemini_model: "gemini-1.5-flash"
+  max_body_chars: 8000
+  batch_size: 20
+  silver_prefix: "vnexpress/silver/"
+```
+
+API key: `Variable.get("gemini_api_key")`.
+
+## Implementation Code
+
+**List bronze, call Gemini, write Parquet**:
+
+```python
+keys = [k for k in s3_hook.list_keys(bucket, prefix=f"vnexpress/bronze/ingestion_date={ds}/") if k.endswith(".html")]
+records = []
+for key in keys:
+    html = s3_hook.read_key(key, bucket)
+    data = call_gemini(html, prompt_schema)
+    records.append({**data, "article_id": derive_id(key), "ingestion_date": ds})
+df = pd.DataFrame(records)
+df = df.drop_duplicates(subset=["article_id"], keep="last")
+write_parquet_to_s3(s3_hook, df, bucket, f"vnexpress/silver/ingestion_date={ds}/")
+```
+
+**Gemini call** – keep in utils for unit testing with mock; use `unittest.mock.patch` in tests.

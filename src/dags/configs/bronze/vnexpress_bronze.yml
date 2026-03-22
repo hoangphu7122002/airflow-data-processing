@@ -1,0 +1,15 @@
+# VnExpress bronze config: discovery seeds and S3 layout for raw HTML
+# Used by discover_links and fetch_html DAGs (Phases 2B, 2C)
+
+data_config:
+  seed_urls:
+    - "https://vnexpress.net/"
+    - "https://vnexpress.net/thoi-su"
+    - "https://vnexpress.net/the-gioi"
+    - "https://vnexpress.net/kinh-doanh"
+  allowed_url_patterns:
+    # Article URLs: vnexpress.net/slug-1234567890.html
+    - "https://vnexpress\\.net/[a-z0-9-]+-\\d+\\.html"
+  s3_output_prefix: "vnexpress/bronze/"
+  batch_size: 10  # SQS messages per worker batch
+  num_fetch_workers: 4  # Parallel workers for fetch_html_dag

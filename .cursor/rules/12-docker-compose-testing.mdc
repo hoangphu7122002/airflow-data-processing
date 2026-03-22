@@ -1,0 +1,72 @@
+---
+description: Docker Compose for all services – S3, SQS, Airflow; Localstack for local testing
+globs: ["docker-compose.yml", "**/*.py", "**/*.mdc"]
+---
+
+# 12 – Docker Compose Testing
+
+**All services run via Docker Compose.** S3 and SQS are provided by Localstack. Use this for local development and testing.
+
+## Services in Docker Compose
+
+| Service | Purpose |
+|---------|---------|
+| postgres | Airflow metadata DB |
+| redis | Celery broker |
+| localstack | S3 + SQS (port 4566) |
+| airflow-webserver | UI (port 8080) |
+| airflow-scheduler | DAG scheduling |
+| airflow-worker | Task execution |
+| airflow-init | DB init, create admin user |
+
+## Start and Init
+
+```bash
+docker compose up -d
+# After Localstack is up, create bucket and queue:
+AWS_ENDPOINT_URL=http://localhost:4566 awslocal s3 mb s3://vnexpress-data
+AWS_ENDPOINT_URL=http://localhost:4566 awslocal sqs create-queue --queue-name vnexpress-url-frontier
+```
+
+## Airflow → Localstack
+
+**docker-compose env** (Airflow services):
+
+```yaml
+AWS_ACCESS_KEY_ID: "test"
+AWS_SECRET_ACCESS_KEY: "test"
+AWS_DEFAULT_REGION: "us-east-1"
+AWS_ENDPOINT_URL: "http://localstack:4566"
+```
+
+**Airflow Connection** `aws_dag_executor`:
+
+```json
+{"endpoint_url": "http://localstack:4566"}
+```
+
+**Airflow Variables**:
+
+- `vnexpress_s3_bucket` = `vnexpress-data`
+- `vnexpress_sqs_queue_url` = `http://localstack:4566/000000000000/vnexpress-url-frontier`
+
+## DAG Code
+
+DAGs use `S3Hook` and `SqsHook` with `aws_conn_id="aws_dag_executor"`. Same code runs against Localstack (Docker) or real AWS (prod).
+
+```python
+s3_hook = S3Hook(aws_conn_id="aws_dag_executor")
+sqs_hook = SqsHook(aws_conn_id="aws_dag_executor")
+```
+
+## Run Tests in Docker
+
+```bash
+docker compose run --rm airflow-cli bash -c "PYTHONPATH=.:src/dags pytest tests/"
+```
+
+## Service Names (Docker network)
+
+- `localstack:4566` – S3, SQS
+- `postgres:5432` – Airflow DB
+- `redis:6379` – Celery

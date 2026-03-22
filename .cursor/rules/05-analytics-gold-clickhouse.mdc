@@ -1,0 +1,54 @@
+---
+description: Gold layer for VnExpress: analytics tables, search indexes, optional ClickHouse
+globs: ["**/*.py", "**/*.md", "**/*.mdc", "docker-compose.yml"]
+---
+
+# 05 – Analytics (Gold Layer)
+
+Gold provides **consumable, analytics-ready** data from the VnExpress silver layer: aggregated tables, time-series counts, and optional search indexes or a warehouse (e.g. ClickHouse) for dashboards and reporting.
+
+## Purpose
+
+- **Gold** = stable outputs for:
+  - Dashboards (articles by section, by day; topic trends).
+  - Search or recommendation (e.g. feed silver Parquet to Elasticsearch or a vector store).
+  - Downstream ML (e.g. topic modeling, trending entities).
+- **Input**: Silver Parquet in S3 (`vnexpress/silver/ingestion_date=YYYY-MM-DD/`).
+
+## Gold Outputs (S3 or Warehouse)
+
+### Option A: S3-Only Gold
+
+- **Path**: `vnexpress/gold/ingestion_date=YYYY-MM-DD/articles.parquet` (or CSV).
+- **Content**: Same or subset of silver columns; one row per article; deduplicated by `article_id` with latest `last_seen_at`.
+- **Aggregates**: Optional daily rollups written to separate objects, e.g.:
+  - `vnexpress/gold/ingestion_date=YYYY-MM-DD/counts_by_section.parquet` (section, count).
+
+### Option B: ClickHouse (or similar) for Analytics
+
+- **Tables**:
+  - `vnexpress_articles`: article_id, url, title, section, published_at, summary, body_text (or truncated), main_entities, tags, first_seen_at, last_seen_at, ingestion_date.
+  - Partition by `toYYYYMM(toDate(ingestion_date))`; order by `(section, last_seen_at, article_id)`.
+- **Loading**: After silver DAG run, read silver Parquet from S3 and bulk insert (e.g. `clickhouse_driver` or `INSERT INTO ... SELECT` from S3 table function). Upsert/key by `article_id` if you want latest row per article.
+- **Materialized views** (optional):
+  - Count by section per day.
+  - Count by hour for publish time distribution.
+
+## Downstream Consumption
+
+- **Dashboards**: Superset connected to ClickHouse or DB synced from S3 gold.
+- **Search**: Index silver/gold Parquet or DB rows into Elasticsearch/OpenSearch with title, summary, body_text, tags for full-text search.
+- **ML**: Read gold Parquet or query ClickHouse for training features (sections, entities, time).
+
+## Implementation Code
+
+**Read silver, write gold Parquet**:
+
+```python
+keys = [k for k in s3_hook.list_keys(bucket, prefix=f"vnexpress/silver/ingestion_date={ds}/") if k.endswith(".parquet")]
+df = pd.concat([pd.read_parquet(io.BytesIO(s3_hook.read_key(k, bucket))) for k in keys])
+df = df.drop_duplicates(subset=["article_id"], keep="last")
+write_parquet_to_s3(s3_hook, df, bucket, f"vnexpress/gold/ingestion_date={ds}/articles_")
+```
+
+**ClickHouse insert** – use `clickhouse_driver` or S3 table function; upsert by `article_id`.

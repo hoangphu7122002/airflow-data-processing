@@ -1,0 +1,77 @@
+---
+description: Navigation index and roadmap for the VnExpress web crawler and analytics project
+globs: ["**/*.py", "**/*.md", "**/*.mdc"]
+---
+
+# VnExpress Crawler ETL – Rules Index
+
+> **Main Entry Point**: Start here when working on the VnExpress crawler (URL frontier on SQS, multi-worker downloaders, S3 storage, and optional parsing/analytics) under `src/dags`.
+>
+> **Manual step-by-step plan**: [.cursor/plans/vnexpress_manual_step_by_step_plan.md](.cursor/plans/vnexpress_manual_step_by_step_plan.md) – phased plan to build the pipeline manually.
+
+This ruleset guides you through building and evolving an end-to-end data pipeline that:
+
+- **Discovers article links** from `https://vnexpress.net/` and important sections.
+- **Pushes URLs into a queue** (SQS) acting as a URL frontier.
+- **Runs multiple workers** to pull URLs from the queue, download HTML, and store raw snapshots in S3 (bronze).
+- **Parses and normalizes** articles (silver) using **LLM Gemini** to extract structured data from HTML, then builds analytics-ready tables or indexes (gold).
+
+## Files & When to Use Them
+
+| File | Purpose | When to Use |
+|------|---------|-------------|
+| [01-architecture-overview.mdc](01-architecture-overview.mdc) | System design and data flow for the VnExpress crawler | Before any architectural decision or implementation |
+| [02-ingestion-layer.mdc](02-ingestion-layer.mdc) | Ingestion patterns for discovering and fetching VnExpress pages | When implementing or changing crawler behavior under `src/dags` |
+| [03-raw-storage-bronze.mdc](03-raw-storage-bronze.mdc) | S3 bronze layout and conventions for raw HTML snapshots | When defining or changing raw storage paths and formats |
+| [04-transform-silver.mdc](04-transform-silver.mdc) | Silver: LLM Gemini HTML processing and parsed article schema | When changing parsing prompts, Gemini usage, or normalized schema |
+| [05-analytics-gold-clickhouse.mdc](05-analytics-gold-clickhouse.mdc) | Gold-layer design: analytics tables, search indexes, or ClickHouse schema | When designing gold outputs for analytics/search |
+| [06-airflow-dags.mdc](06-airflow-dags.mdc) | Airflow DAG patterns for crawl → parse → load using queues and workers | When creating or modifying DAGs in `src/dags/**` |
+| [07-data-quality-and-testing.mdc](07-data-quality-and-testing.mdc) | Testing and data-quality checks for the crawler | When adding tests or validating HTML/parsed content |
+| [08-dashboard-and-superset.mdc](08-dashboard-and-superset.mdc) | (Optional) Dashboards and analytics on VnExpress content | When building dashboards or reporting on parsed articles |
+| [09-config-and-deployment.mdc](09-config-and-deployment.mdc) | Docker-compose, env vars, Airflow/S3/SQS configuration | When wiring services or deploying |
+| [10-advanced-patterns.mdc](10-advanced-patterns.mdc) | Backfills, schema evolution, scaling for the crawler | When extending or scaling the system |
+| [11-code-reference-patterns.mdc](11-code-reference-patterns.mdc) | Code patterns – inline code, no paths | When implementing DAGs, utils, configs, or tests |
+| [12-docker-compose-testing.mdc](12-docker-compose-testing.mdc) | Docker Compose – S3, SQS (Localstack), Airflow | When testing or configuring local stack |
+
+## Phased Implementation Roadmap
+
+### Phase 1 – Foundation
+
+1. Read [01-architecture-overview.mdc](01-architecture-overview.mdc) and map it to DAGs you plan to build under `src/dags`.
+2. Skim [09-config-and-deployment.mdc](09-config-and-deployment.mdc) for Airflow, S3, SQS, and environment setup.
+
+### Phase 2 – Ingestion & Bronze (Crawl + Raw Storage)
+
+3. Implement or update ingestion per [02-ingestion-layer.mdc](02-ingestion-layer.mdc):
+   - **Link discovery**: Homepage and key sections → push URLs to SQS.
+   - **Workers**: Multiple tasks pull from SQS, fetch HTML, and write to S3 bronze.
+4. Store raw HTML snapshots in bronze S3 using [03-raw-storage-bronze.mdc](03-raw-storage-bronze.mdc) conventions.
+
+### Phase 3 – Silver (LLM Gemini + Parsing)
+
+5. Design silver schemas in [04-transform-silver.mdc](04-transform-silver.mdc) (article metadata: title, section, publish time, summary, entities, etc.).
+6. Implement silver transform: read bronze HTML from S3, call **Gemini** to extract structured fields from HTML, validate and normalize output, deduplicate by article ID, write Parquet to S3 silver.
+
+### Phase 4 – Gold & Analytics – Optional
+
+7. Define gold outputs in [05-analytics-gold-clickhouse.mdc](05-analytics-gold-clickhouse.mdc): tables for article analytics (by section, time, topic) or search-friendly stores.
+8. Ensure gold steps produce stable S3 or database locations for downstream jobs (dashboards, search indexers, ML).
+
+### Phase 5 – Quality & Advanced
+
+9. Add tests and data-quality checks per [07-data-quality-and-testing.mdc](07-data-quality-and-testing.mdc).
+10. Use [10-advanced-patterns.mdc](10-advanced-patterns.mdc) for backfills, schema evolution, and scaling the crawler (more sections, higher frequency).
+
+## Common Workflows
+
+### Adding a New Section or URL Pattern
+
+1. Update link-discovery logic and configuration in [02-ingestion-layer.mdc](02-ingestion-layer.mdc) (e.g. list of section URLs, allowed path patterns).
+2. Ensure bronze S3 layout remains compatible or document any changes in [03-raw-storage-bronze.mdc](03-raw-storage-bronze.mdc).
+3. If you parse content, update silver (Gemini prompts and schema) in [04-transform-silver.mdc](04-transform-silver.mdc) to include section/category or new fields.
+
+### Changing Crawl Frequency or Depth
+
+1. Adjust Airflow DAG schedules using [06-airflow-dags.mdc](06-airflow-dags.mdc) as a guide.
+2. Tune SQS batch sizes and worker concurrency to match new load.
+3. Revisit data-retention and analytics needs in [05-analytics-gold-clickhouse.mdc](05-analytics-gold-clickhouse.mdc).

@@ -1,0 +1,66 @@
+---
+description: Code reference patterns – include inline code when writing; no directory paths
+globs: ["**/*.py", "**/*.yml", "**/*.yaml"]
+---
+
+# 11 – Code Reference Patterns
+
+When implementing or modifying code, **include inline code** and follow established patterns. Do **not** reference directory paths (project may move).
+
+## When to Apply
+
+- Implementing new DAGs, tasks, or transforms
+- Adding utils, S3 helpers, or validation logic
+- Creating or updating YAML configs (bronze/silver/gold)
+- Writing tests for DAGs or utils
+
+## Rules
+
+1. **Include code** – When suggesting changes, provide the actual code snippet inline.
+2. **No directory paths** – Do not reference paths; use generic terms (configs, utils, bronze/silver/gold).
+3. **Match conventions** – Config loading, S3 writes, validation, error handling.
+
+## DAG Structure (Code)
+
+```python
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "../configs")
+bronze_config = load_yml_configs(f"{CONFIG_PATH}/bronze/flow_bronze.yml")
+SlackWebhookOperator(trigger_rule="one_failed", ...)
+```
+
+## S3 Parquet (Code)
+
+```python
+write_parquet_to_s3(s3_hook, df, bucket, prefix)
+# Partition: year={Y}/month={M:02d}/day={D:02d}/data_{job_id}_
+```
+
+## Validation (Code)
+
+```python
+rules["columns"]  # required columns
+rules["constraints"]  # timestamp_not_null, demand_mw_range, etc.
+```
+
+## Deduplication (Code)
+
+```python
+df = df.sort_values(["feeder_id", "timestamp", "ingestion_ts"])
+df = df.drop_duplicates(subset=["feeder_id", "timestamp"], keep="last")
+```
+
+## Tests (Code)
+
+```python
+@mock_aws
+def test_write_parquet_to_s3():
+    s3_hook = S3Hook(aws_conn_id="aws_default", region_name="us-east-1")
+    client = s3_hook.get_conn()
+    client.create_bucket(Bucket=bucket_name)
+    write_parquet_to_s3(s3_hook, df, bucket_name, "test/")
+```
+
+## Code Format
+
+- **Formatter**: `ruff format`
+- **Test run**: `PYTHONPATH=.:src/dags pytest tests/`

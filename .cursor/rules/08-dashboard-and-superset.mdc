@@ -1,0 +1,35 @@
+---
+description: Optional dashboards and analytics on VnExpress content (gold layer)
+globs: ["**/*.md", "**/*.mdc", "docker-compose.yml"]
+---
+
+# 08 – Dashboard and Superset
+
+Optional: build dashboards and reporting on **VnExpress** article data from the gold layer (S3 Parquet or ClickHouse).
+
+## Data Source
+
+- **Primary**: Gold Parquet in S3 or tables in ClickHouse loaded from silver/gold.
+- **Schema**: article_id, url, title, section, published_at, summary, main_entities, tags, first_seen_at, last_seen_at, ingestion_date.
+
+## Connecting Superset
+
+- **ClickHouse**: SQLAlchemy URI `clickhouse+http://user:password@host:8123/dbname`. In docker-compose, point at the ClickHouse service.
+- **S3-only**: Sync gold Parquet into a DB via load job:
+
+```python
+df = read_gold_parquet(s3_hook, bucket, prefix)
+df.to_sql("vnexpress_articles", engine, if_exists="append")
+```
+
+## Suggested Datasets and Dashboards
+
+- **Articles by section**: Count of articles per section (Thời sự, Thế giới, …) per day or week.
+- **Publish time distribution**: Histogram of `published_at` by hour/day.
+- **Entity and tag trends**: Top main_entities and tags over time.
+- **Coverage**: Number of articles ingested per day; trend over time.
+
+## UX Guidelines
+
+- Global filters: date range, section.
+- Default view: “Articles per section today” and “Last 7 days trend.”

@@ -1,0 +1,69 @@
+---
+description: Docker Compose, Localstack (S3/SQS), and deployment for VnExpress crawler
+globs: ["docker-compose.yml", "**/*.md", "**/*.mdc"]
+---
+
+# 09 – Config and Deployment
+
+**All services run via Docker Compose.** S3 and SQS are provided by Localstack. Same DAG code runs against Localstack (local) or real AWS (prod).
+
+## Services (docker-compose)
+
+- **Airflow**: webserver, scheduler, worker, init. Mount dags and src.
+- **Localstack** (local demo):
+  - Image: `localstack/localstack`.
+  - Expose **edge port** (e.g. 4566) for all services (S3, SQS, etc.).
+  - Environment: `SERVICES=s3,sqs`; optional `DEBUG=1`.
+  - **Init**: Create S3 bucket and SQS queue on startup. Options:
+    - Init script after Localstack up:
+
+```bash
+awslocal s3 mb s3://vnexpress-data
+awslocal sqs create-queue --queue-name vnexpress-url-frontier
+```
+    - Or use Localstack **persistence** and create resources once manually.
+  - Workers reach Localstack at `http://localstack:4566`.
+- **Optional**: ClickHouse and Superset for gold analytics and dashboards.
+
+## Environment Variables
+
+- **Airflow**: `AIRFLOW__CORE__EXECUTOR`, `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`, etc. (reuse repo).
+- **Localstack**: No AWS credentials needed for basic use; use static test creds (e.g. `AWS_ACCESS_KEY_ID=test`, `AWS_SECRET_ACCESS_KEY=test`, `AWS_DEFAULT_REGION=us-east-1`). Set `AWS_ENDPOINT_URL=http://localstack:4566` (or `LOCALSTACK_HOST`) in Airflow worker/scheduler env so boto3/S3Hook use Localstack.
+- **VnExpress**:
+  - `vnexpress_s3_bucket` — bucket name (e.g. `vnexpress-data`).
+  - `vnexpress_sqs_queue_url` — full SQS queue URL (Localstack: `http://localstack:4566/000000000000/vnexpress-url-frontier` or your account/queue name).
+  - `vnexpress_environment` — `local` or `prod`.
+- **Gemini**: `gemini_api_key` — Google AI API key (Variable only; never in env file in repo).
+
+## Celery (workers)
+
+Worker DAGs (e.g. `vnexpress_fetch_html_dag`) run tasks on **Celery workers** for parallelism. In docker-compose use:
+
+- **Executor**: `AIRFLOW__CORE__EXECUTOR=CeleryExecutor`
+- **Broker**: `AIRFLOW__CELERY__BROKER_URL` (e.g. `redis://:@redis:6379/0`)
+- **Result backend**: `AIRFLOW__CELERY__RESULT_BACKEND` (e.g. `db+postgresql://...`)
+- **Service**: `airflow-worker` with command `celery worker`
+
+Without these, fetch (and other worker) tasks would not run in parallel on separate workers.
+
+## Airflow Connection (Localstack)
+
+- **Connection id**: `aws_dag_executor` (or same id used in DAGs).
+- **Type**: Amazon Web Services.
+- **Extra**: `{"endpoint_url": "http://localstack:4566"}` so S3Hook and SqsHook use Localstack. For older provider versions, use host/port if documented.
+- **Credentials**: Login = `test`, Password = `test` (Localstack accepts these).
+
+With this, the same DAG code runs against Localstack locally and against real AWS in production by changing the connection (and Variables) only.
+
+## Local Development Flow
+
+1. `docker-compose up` (Airflow + Localstack).
+2. Ensure bucket and queue exist: `AWS_ENDPOINT_URL=http://localhost:4566 awslocal s3 mb s3://vnexpress-data` (or init script).
+3. Set Airflow Variables: `vnexpress_s3_bucket`, `vnexpress_sqs_queue_url`, `gemini_api_key`.
+4. Trigger `vnexpress_discover_links_dag`, then `vnexpress_fetch_html_dag`; check Localstack S3 and SQS (e.g. Localstack admin or awslocal).
+5. Trigger `vnexpress_silver_gemini_dag`; check silver prefix in S3.
+
+## Production
+
+- Use **real AWS** S3 and SQS; remove or override `endpoint_url` in the Airflow connection; set real bucket and queue URL in Variables.
+- Store `gemini_api_key` in a secrets backend (e.g. Airflow Secrets Backend) and reference as Variable.

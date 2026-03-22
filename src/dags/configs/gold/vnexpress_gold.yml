@@ -1,0 +1,10 @@
+# VnExpress gold config: aggregated Parquet and optional ClickHouse
+# Used by vnexpress_gold_load_dag (optional)
+
+data_config:
+  gold_prefix: "vnexpress/gold/"
+  silver_prefix: "vnexpress/silver/"
+  clickhouse_enabled: false   # Set via Variable for local override
+  clickhouse_host: "clickhouse"
+  clickhouse_port: 8123
+  clickhouse_table: "vnexpress_articles"
