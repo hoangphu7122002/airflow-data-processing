@@ -19,9 +19,9 @@ def _load_silver_and_dedupe(s3_hook, bucket: str, silver_prefix: str, ds: str) -
         return pd.DataFrame()
     dfs = []
     for k in keys:
-        raw = s3_hook.read_key(key=k, bucket_name=bucket)
-        buf = raw if isinstance(raw, bytes) else raw.encode("utf-8")
-        dfs.append(pd.read_parquet(io.BytesIO(buf)))
+        obj = s3_hook.get_key(key=k, bucket_name=bucket)
+        raw_bytes = obj.get()["Body"].read()
+        dfs.append(pd.read_parquet(io.BytesIO(raw_bytes)))
     df = pd.concat(dfs, ignore_index=True)
     return df.drop_duplicates(subset=["article_id"], keep="last")
 

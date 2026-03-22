@@ -9,7 +9,11 @@ def get_client():
     """Get ClickHouse client using environment variables."""
     host = os.environ.get("CLICKHOUSE_HOST", "clickhouse")
     port = int(os.environ.get("CLICKHOUSE_PORT", "8123"))
-    return clickhouse_connect.get_client(host=host, port=port)
+    username = os.environ.get("CLICKHOUSE_USER", "default")
+    password = os.environ.get("CLICKHOUSE_PASSWORD", "")
+    return clickhouse_connect.get_client(
+        host=host, port=port, username=username, password=password
+    )
 
 
 def query_articles(

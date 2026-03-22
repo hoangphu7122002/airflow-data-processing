@@ -53,9 +53,9 @@ def vnexpress_gold_load():
 
         dfs = []
         for k in keys:
-            raw = s3_hook.read_key(key=k, bucket_name=bucket)
-            buf = raw if isinstance(raw, bytes) else raw.encode("utf-8")
-            dfs.append(pd.read_parquet(io.BytesIO(buf)))
+            obj = s3_hook.get_key(key=k, bucket_name=bucket)
+            raw_bytes = obj.get()["Body"].read()
+            dfs.append(pd.read_parquet(io.BytesIO(raw_bytes)))
 
         df = pd.concat(dfs, ignore_index=True)
         df = df.drop_duplicates(subset=["article_id"], keep="last")
@@ -91,8 +91,12 @@ def vnexpress_gold_load():
         host = data_config.get("clickhouse_host", "clickhouse")
         port = int(data_config.get("clickhouse_port", 8123))
         table = data_config.get("clickhouse_table", "vnexpress_articles")
+        username = os.environ.get("CLICKHOUSE_USER", "default")
+        password = os.environ.get("CLICKHOUSE_PASSWORD", "")
 
-        client = clickhouse_connect.get_client(host=host, port=port)
+        client = clickhouse_connect.get_client(
+            host=host, port=port, username=username, password=password
+        )
         create_vnexpress_articles_table(client)
         insert_articles_df(client, df, table=table)
 

@@ -107,6 +107,29 @@ flowchart LR
 
 ---
 
+## Build & verify (recommended before first run)
+
+To build images, start the stack, initialize LocalStack, set Airflow vars, and run tests:
+
+```bash
+./scripts/verify_stack.sh
+```
+
+This script will:
+
+1. Stop any existing stack
+2. Build images (uses `requirements_local_minimal.txt` for faster build)
+3. Start all containers
+4. Wait for Postgres, Redis, and Airflow init
+5. Create S3 bucket and SQS queue on LocalStack
+6. Set Airflow variables and the `aws_dag_executor` connection
+7. Run pytest inside the scheduler
+8. Report container health
+
+**First build** may take 5–10 minutes. Subsequent runs are faster if you skip rebuild: `docker compose up -d` then run steps 5–7 manually.
+
+---
+
 ## Run the stack (first time)
 
 From the top-level project folder (where you cloned or unpacked the code):

@@ -6,7 +6,7 @@ from utils.gemini_extract import extract_article_from_html
 from utils.url_utils import extract_article_id_from_key
 
 
-@patch("utils.gemini_extract.genai.GenerativeModel")
+@patch("google.generativeai.GenerativeModel")
 def test_extract_article_from_html_success(mock_model_class):
     """Test extraction with mocked Gemini API returns parsed dict."""
     mock_model = MagicMock()
@@ -35,7 +35,7 @@ def test_extract_article_from_html_success(mock_model_class):
     assert result["body_text"] == "Article body text"
 
 
-@patch("utils.gemini_extract.genai.GenerativeModel")
+@patch("google.generativeai.GenerativeModel")
 def test_extract_article_from_html_missing_required_returns_none(mock_model_class):
     """Test that missing title or url returns None."""
     mock_model = MagicMock()
@@ -51,7 +51,7 @@ def test_extract_article_from_html_missing_required_returns_none(mock_model_clas
     assert result is None
 
 
-@patch("utils.gemini_extract.genai.GenerativeModel")
+@patch("google.generativeai.GenerativeModel")
 def test_extract_article_from_html_empty_response_returns_none(mock_model_class):
     """Test that empty Gemini response returns None."""
     mock_model = MagicMock()

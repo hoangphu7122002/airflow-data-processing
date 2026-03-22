@@ -1,0 +1,26 @@
+# Minimal deps for core DAGs (discover, fetch, silver, gold) + pytest.
+# Use this for faster Docker build; full requirements_local.txt adds torch, darts, etc.
+apache-airflow==2.10.3
+apache-airflow-providers-amazon==9.0.0
+apache-airflow-providers-celery==3.5.0
+redis>=5.0.0
+apache-airflow-providers-postgres==5.13.1
+apache-airflow-providers-slack==8.9.1
+apache-airflow-providers-microsoft-azure==11.0.0
+apache-airflow-providers-google==10.25.0
+boto3==1.35.36
+pytest==8.3.3
+pendulum==3.0.0
+pandas==2.1.4
+requests==2.32.3
+google-generativeai>=0.8.0
+clickhouse-connect>=0.7.0
+beautifulsoup4==4.12.3
+pyarrow==16.1.0
+numpy==1.26.4
+moto==5.0.11
+Flask-SQLAlchemy==2.5.1
+Flask-AppBuilder==4.5.3
+SQLAlchemy==1.4.54
+marshmallow==3.23.1
+s3fs==2024.10.0
