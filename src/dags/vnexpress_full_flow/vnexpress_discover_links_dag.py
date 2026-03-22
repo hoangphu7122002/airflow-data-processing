@@ -10,6 +10,7 @@ import pendulum
 import requests
 from airflow.decorators import dag, task
 from airflow.models import Variable
+from airflow.operators.python import get_current_context
 from airflow.providers.amazon.aws.hooks.sqs import SqsHook
 
 from utils.helper import load_yml_configs
@@ -31,12 +32,15 @@ USER_AGENT = "Mozilla/5.0 (compatible; VnExpressCrawler/1.0)"
 def vnexpress_discover_links():
     @task
     def discover_links() -> dict:
+        context = get_current_context()
+        ds = context["ds"]  # Use logical date for alignment with silver/gold
+
         config = load_yml_configs(f"{CONFIG_PATH}/bronze/vnexpress_bronze.yml")
         seed_urls = config["data_config"]["seed_urls"]
         patterns = config["data_config"]["allowed_url_patterns"]
         pattern = patterns[0] if isinstance(patterns, list) else patterns
         queue_url = Variable.get("vnexpress_sqs_queue_url")
-        ingestion_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        ingestion_date = ds
         discovered_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         sqs_hook = SqsHook(aws_conn_id="aws_dag_executor")

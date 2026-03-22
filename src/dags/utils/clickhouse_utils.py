@@ -59,6 +59,16 @@ def insert_articles_df(
         if col in work.columns:
             work[col] = work[col].fillna("").astype(str)
 
+    # Normalize datetime columns to timezone-naive UTC for ClickHouse DateTime64
+    for col in ("first_seen_at", "last_seen_at"):
+        if col in work.columns:
+            ser = pd.to_datetime(work[col], utc=True)
+            work[col] = ser.dt.tz_localize(None)
+
+    # Normalize ingestion_date to date string YYYY-MM-DD
+    if "ingestion_date" in work.columns:
+        work["ingestion_date"] = pd.to_datetime(work["ingestion_date"]).dt.strftime("%Y-%m-%d")
+
     # Select and order columns to match ClickHouse schema
     cols = [
         "article_id", "url", "title", "section",

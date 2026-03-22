@@ -54,6 +54,8 @@ def vnexpress_gold_load():
         dfs = []
         for k in keys:
             obj = s3_hook.get_key(key=k, bucket_name=bucket)
+            if obj is None:
+                raise ValueError(f"Silver Parquet key not found (S3 eventual consistency?): {k}")
             raw_bytes = obj.get()["Body"].read()
             dfs.append(pd.read_parquet(io.BytesIO(raw_bytes)))
 
