@@ -4,6 +4,90 @@ End-to-end pipeline for **[VnExpress](https://vnexpress.net/)** news: discover a
 
 ---
 
+## System architecture
+
+### Runtime (Docker Compose)
+
+Services share the `airflow_network` bridge (except host-published ports). **Airflow** uses **Postgres** for metadata and **Redis** as the **Celery** broker; workers and the scheduler call **LocalStack** (S3/SQS), **Gemini** (silver), and optionally **ClickHouse** (gold).
+
+```mermaid
+flowchart TB
+  subgraph external["External APIs"]
+    VNE[VnExpress.net]
+    GEM[Google Gemini]
+  end
+
+  subgraph dc["Docker Compose"]
+    subgraph af["Apache Airflow — CeleryExecutor"]
+      WEB[Webserver :8080]
+      SCH[Scheduler]
+      TRG[Triggerer]
+      WRK[Celery workers]
+    end
+    PG[(Postgres — Airflow metadata)]
+    RD[(Redis — Celery broker)]
+    LS[LocalStack — S3 and SQS :4566]
+    CH[(ClickHouse :8123)]
+    FAPI[FastAPI — articles API :8000]
+    LUI[LocalUI — S3/SQS browser :8088]
+
+    SCH --> PG
+    SCH --> RD
+    WEB --> PG
+    WRK --> PG
+    WRK --> RD
+    WRK --> LS
+    WRK --> CH
+    TRG --> PG
+    TRG --> RD
+    FAPI --> CH
+    LUI --> LS
+  end
+
+  VNE --> WRK
+  WRK --> GEM
+```
+
+### Data flow (medallion + DAGs)
+
+Logical pipeline: discover → queue → fetch → bronze → silver (LLM) → gold → optional analytics store.
+
+```mermaid
+flowchart LR
+  subgraph src["Source"]
+    WEBX[VnExpress pages]
+  end
+  subgraph queue["Frontier"]
+    SQS[SQS queue]
+  end
+  subgraph storage["LocalStack S3"]
+    BR[vnexpress/bronze<br/>raw HTML]
+    SV[vnexpress/silver<br/>Parquet]
+    GD[vnexpress/gold<br/>Parquet]
+  end
+  subgraph dags["Airflow DAGs"]
+    D1[vnexpress_discover_links_dag]
+    D2[vnexpress_fetch_html_dag]
+    D3[vnexpress_silver_gemini_dag]
+    D4[vnexpress_gold_load_dag]
+  end
+  subgraph opt["Optional"]
+    CHX[(ClickHouse)]
+  end
+
+  WEBX --> D1
+  D1 --> SQS
+  SQS --> D2
+  D2 --> BR
+  BR --> D3
+  D3 --> SV
+  SV --> D4
+  D4 --> GD
+  D4 --> CHX
+```
+
+---
+
 ## What it does
 
 - **Discovery** — Crawl the homepage and configured section pages; normalize and dedupe article URLs; enqueue one message per URL.
